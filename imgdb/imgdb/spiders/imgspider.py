@@ -13,7 +13,7 @@ class ImgspiderSpider(scrapy.Spider):
             '//*[@id="content"]/div/div[1]/ol/li/div/div[1]/a/img/@src').extract()
         for i in x:
             imgs['image_urls'] = i
-            # print('spider.name',imgs['image_url'])
+            # print('spider.name',imgs['image_urls'])
             yield imgs
         try:
             nextlink = 'https://movie.douban.com/top250'+response.xpath(

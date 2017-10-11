@@ -12,5 +12,5 @@ class Dbmovtop250Item(scrapy.Item):
     mov_name = scrapy.Field()
     mov_score = scrapy.Field()
 
-    image_url = scrapy.Field()
-    images = scrapy.Field()
+    #image_url = scrapy.Field()
+    #images = scrapy.Field()

@@ -9,7 +9,7 @@ import os
 import random
 from bs4 import BeautifulSoup
 from pymongo import MongoClient
-from headerpool import headerseletor
+from headerpool import headerseletor       # 导入请求头配置池
 from requests import Request, Session
 from multiprocessing import Process, Queue, Manager,Pool
 

@@ -1,0 +1,345 @@
+# -*- coding:utf-8 -*-  
+# python 3.5
+# make by HeTianen
+
+import re
+import redis
+import time
+import os
+import random
+from bs4 import BeautifulSoup
+from pymongo import MongoClient
+from headerpool import headerseletor
+from requests import Request, Session
+from multiprocessing import Process, Queue, Manager,Pool
+
+random.seed(time.time())
+redis_pool = redis.ConnectionPool(host='localhost', port=6379, db=0,decode_responses=True)
+global MYREDIS
+MYREDIS = redis.Redis(connection_pool=redis_pool)#连接redis服务
+
+
+def link_request(num,queuel):   #网络请求
+    print(">>>>>>>>>> No.{} link_request is start <<<<<<<<<<".format(num))
+    L = queuel
+    while True:
+        time.sleep(2)
+        url = MYREDIS.spop('zone')
+        zone= int(MYREDIS.scard('zone'))
+        if zone == 0:
+            print(">> {} << zone_set is empty!".format(zone))
+            url = MYREDIS.spop('group')
+            group = int(MYREDIS.scard('group'))
+            if group == 0:
+                print(">> {} << group_set is empty!".format(group))
+                url = MYREDIS.spop('category')
+                category=int(MYREDIS.scard('category'))
+                if category == 0:
+                    print(">> {} << category is empty!".format(category))
+                    done = int(MYREDIS.scard('done'))
+                    # print(">> {} << done is empty!".format(done))
+                    if done == 0:
+                        print(">> {} << done is empty!".format(done))
+                        url = None
+                        print('NO.{} link_request:任务还没有开始！'.format(num))
+                    else:
+                        print(">> {} << done !".format(done))
+                        print("NO.{} link_request:所有连接抓取完毕！".format(num))
+                        break
+        if url == None:
+            req_url = "https://www.price.com.hk/"
+        else:
+            url = str(url)
+            req_url = "https://www.price.com.hk/" + url
+        header =headerseletor()
+        S = Session()
+        payload = (('action','getuserlastmsgdate'),)
+        req = Request('POST', req_url, data=payload, headers=header)#配置一个Request对象
+        req_prepped = S.prepare_request(req)#封装
+        print("NO.{} link_request:正在请求 {}！".format(num,url))
+        time.sleep(random.choice(range(2,5)))
+        try:
+            resp = S.send(req_prepped,timeout = 10)
+            print(resp.status_code)
+        except Exception as e:
+            MYREDIS.sadd("error", url)
+            MYREDIS.sadd("done", url)
+            print("请求响应异常！已经保存应连接")
+            print(resp.status_code)
+            continue
+        if resp.status_code == 200:
+            L.put(resp)
+            MYREDIS.sadd("done", url)
+            print("NO.{} link_request: {} >>> done  添加至完成清单！".format(num,url))
+    print(">>>>>>>>>> No.{} link_request is close <<<<<<<<<<".format(num))
+
+def product_request(num,queuep):   #网络请求
+    print(">>>>>>>>>> NO.{} product_request is start <<<<<<<<<<".format(num))
+    P = queuep
+    time.sleep(20)
+    while True:
+        print(">>>>>>>>>> NO.{} product_request is Running <<<<<<<<<<".format(num))
+        time.sleep(1)
+        url = MYREDIS.spop('product')
+        if url == None :
+            allset = int(MYREDIS.scard('zone')) + int(MYREDIS.scard('group')) + int(MYREDIS.scard('category'))
+            if allset == 0:
+                if int(MYREDIS.scard('done'))==0:
+                    time.sleep(10)
+                    continue
+                else:
+                    print('No.{}:所有商品连接抓取完毕！'.format(num))
+                    break
+            else:
+                time.sleep(10)
+                continue
+        else:
+            print('NO.{} product_request 正在请求 {}'.format(num,url))
+            req_url = "https://www.price.com.hk/" + str(url)
+            header =headerseletor()
+            S = Session()
+            payload = (('action','getuserlastmsgdate'),)
+            req = Request('POST', req_url, data=payload, headers=header)#配置一个Request对象
+            req_prepped = S.prepare_request(req)#封装
+            time.sleep(random.choice(range(2,5)))
+            try:
+                resp = S.send(req_prepped,timeout = 10)
+                print("NO.{} product_request get status code >>>>> ".format(num),resp.status_code)
+            except Exception as e:
+                MYREDIS.sadd("error2", url)
+                MYREDIS.sadd("done", url)
+                print("响应异常")
+                print("NO.{} product_request get status code >>>>> ".format(num),resp.status_code)
+                continue
+            if resp.status_code == 200:
+                P.put((str(url),resp))
+                MYREDIS.sadd("done", url)
+    print(">>>>>>>>>> NO.{} product_request is close <<<<<<<<<<".format(num))
+
+def linkspider(queuel):
+    print(">>>>>>>>>> linkspider start <<<<<<<<<<")
+    L = queuel
+    try:
+        while True:
+            resp = L.get(block =True)
+            resp.encoding ='UTF-8'
+            pattern1 = re.compile("zone\.php\?z=[0-9]{1,4}")
+            pattern2 = re.compile("group\.php\?g=[0-9]{1,4}")
+            pattern3 = re.compile("category\.php\?c=[0-9]{1,8}")
+            pattern4 = re.compile("product\.php\?p=[0-9]{1,8}")
+            zone_set = pattern1.findall(resp.text)
+            group_set = pattern2.findall(resp.text)
+            category_set = pattern3.findall(resp.text)
+            product_set = pattern4.findall(resp.text)
+            for z in zone_set:
+                if MYREDIS.sismember("done", z):
+                    print("{} is already request".format(z))
+                else:
+                    MYREDIS.sadd("zone", z)
+                    print("linkspider adding {} to zone collection!".format(z))
+            for g in group_set:
+                if MYREDIS.sismember("done", g):
+                    print("{} is already request".format(g))
+                else:
+                    MYREDIS.sadd("group", g)
+                    print("linkspider adding {} to group collection!".format(g))
+            for c in category_set:
+                if MYREDIS.sismember("done", c):
+                    print("{} is already request".format(c))
+                else:
+                    MYREDIS.sadd("category", c)
+                    print("linkspider adding {} to category collection!".format(c))
+            for p in product_set:
+                if MYREDIS.sismember("done", p):
+                    print("{} is already request".format(p))
+                else:
+                    MYREDIS.sadd("product", p)
+                    print("linkspider adding {} to product collection!".format(p))
+            print("linkspider 准备查找下一页面")
+            for i in ["zone","group","category"]:
+                next_page_check(i,resp)
+            print("linkspider 查找下一页完成")
+    except Exception as e:
+        raise
+    print(">>>>>>>>>> linkspider is close <<<<<<<<<<")
+
+def parse(queuep): #详情页面解析
+    print(">>>>>>>>>> Parse is ready! <<<<<<<<<<")
+    P = queuep
+    print("parse等待20秒！")
+    time.sleep(20)
+    client = MongoClient()
+    db = client.hkprice
+    coll = db.detail
+    try:
+        while True:
+            print(">>>>>>>>>> Parse is Running! <<<<<<<<<<")
+            try:
+                url,resp = P.get(block = True)
+                print("Parse成功取得{},开始请求product详情页".format(resp))
+                print("成功获取")
+            except Exception as e:
+                if int(MYREDIS.scard('product'))==0:
+                    break
+                else:continue
+            try:
+                resp.encoding ='UTF-8'
+                obj = BeautifulSoup(resp.text,"lxml")
+                product_obj = obj.find_all("div",class_="product-detail-info")
+                for i in product_obj:
+                    if i != []:
+                        product_info = i.find_all('div',class_ = "product-col-info")
+                        for i in product_info:
+                            if i :
+                                product_name = i.find_all("h1",class_ = "product-name")
+                                for i in product_name:
+                                    if i :
+                                        for string in i.strings:
+                                            name_text = string
+            except (AttributeError, IndexError,TypeError) as e:
+                print("无法找到商品名字！")
+                pass
+            try:
+                shops = obj.find_all("ul",class_="list-unstyled list-inline")
+                for i in shops:
+                    shops_list = i.find_all("li" ,id=re.compile("[0-9]{8}"))
+                    if shops_list != []:
+                        for shop_info in shops_list:  #shop_info —— 单个商户的全部信息
+                            data={}
+                            try:
+                                data["url"] = url
+                                data["product"] = name_text
+                                data["shop_name"] = shop_info.find("p",class_="quotation-merchant-name").a.string
+                                data["level"] = shop_info.find("span",class_="quotation-merchant-level").string
+                                data["address"] = shop_info.find("p",class_="quotation-merchant-address").a.string
+                            except (AttributeError, IndexError,TypeError) as e:
+                                pass
+                            try:
+                                data["mon_orders"] = shop_info.find("div",class_="quotation-merchant-spec-month").find_all("p")[1].string
+                                data['total_orders'] = shop_info.find("div",class_="quotation-merchant-spec-total").find_all("p")[1].string
+                                data['star'] = shop_info.find("div",class_="quotation-merchant-spec-rating").img["src"]
+                                data['comments'] = shop_info.find("div",class_="quotation-merchant-spec-rating").img["title"]
+                            except (AttributeError, IndexError,TypeError) as e:
+                                pass
+                            try:
+                                # print("查找价格")
+                                try:
+                                    price_hong = shop_info.find("div",class_="quote-price-hong").find_all("span",class_="text-price-number")
+                                    # print(price_hong)
+                                    try:
+                                        data['original_price_hong'] = price_hong[0].string
+                                        # print("行货原价：",data['original_price_hong'])
+                                    except Exception as e:
+                                        pass
+                                        # print("没有行货原价")
+                                    try:
+                                        data['price_hong'] = price_hong[-1].string
+                                        # print("行货现价：",data['price_hong'])
+                                    except Exception as e:
+                                        pass
+                                        # print("没有行货现价")
+                                except (AttributeError, IndexError,TypeError) as e:
+                                    pass
+                                    # print("没有行货")
+                                try:
+                                    price_water = shop_info.find("div",class_="quote-price-water").find_all("span",class_="text-price-number")
+                                    # print(price_water)
+                                    try:
+                                        data['original_price_water'] = price_water[0].string
+                                        # print("水货原价：",data['original_price_water'])
+                                    except Exception as e:
+                                        pass
+                                        # print("没有水货原价")
+                                    try:
+                                        data['price_water'] = price_water[-1].string
+                                        # print("水货现价：",data['price_water'])
+                                    except Exception as e:
+                                        pass
+                                        # print("没有水货现价")
+                                except (AttributeError, IndexError,TypeError) as e:
+                                    pass
+                                    # print("没有水货")
+                            except (AttributeError, IndexError,TypeError) as e:
+                                pass
+                                # print("查找价格失败：",url)
+                            try:
+                                all_ad = shop_info.find("div",class_="quote-shop-remark")
+                                ad_list =[]
+                                for string in all_ad.stripped_strings:
+                                    ad_list.append(string)
+                                data["ad"] = ad_list  #广告
+                            except (AttributeError, IndexError,TypeError) as e:
+                                pass
+                            try:
+                                print("Downlodeing!")
+                                result =coll.insert_one(data)
+                                print(result)   #设置保存数据的合集
+                                print(data)
+                                data.clear()
+                            except (AttributeError, IndexError,TypeError) as e:
+                                print(e)
+                                pass
+            except Exception as e:
+                print(e)
+                pass
+            print("parse 准备查找下一页面")
+            next_page_check("product",resp)
+            print("parse 查找下一页完成")
+    except Exception as e:
+        raise
+    print(">>>>>>>>>> Parse is close! <<<<<<<<<<")
+
+def next_page_check(zgcp,resp):  #查找下一页面
+    try:
+        b = zgcp+"\.php\?[z,g,c,p]=[0-9]{1,6}\&amp;page=[0-9]{1,4}"
+        pattern = re.compile(b)
+        next_url = pattern.findall(resp.text)
+        print(next_url)
+        strinfo = re.compile('\&amp;')
+        for i in next_url:
+            a = strinfo.sub("&",i)
+            if MYREDIS.sismember("done", a) == False and a[-6:] != "page=1" :
+                MYREDIS.sadd(zgcp, a)
+                print("next_page_check is adding {} to {}".format(a,zgcp))
+            else:
+                print("连接 {} 已经请求过了！".format(a))
+    except IndexError as e:
+        print("没有一下页！")
+def main(queuel,queuep):
+    error_num= int(MYREDIS.scard("error"))
+    error2_num= int(MYREDIS.scard("error2"))
+    if error_num:
+        for value in range(error_num):
+            error_url = MYREDIS.spop("error")
+            a = MYREDIS.smove("done", "category", error_url)
+            print(a)
+    if error2_num:
+        for value in range(error2_num):
+            error2_url = MYREDIS.spop("error2")
+            b = MYREDIS.smove("done", "product", error2_url)
+            print(b)
+    link_pool = Pool(processes = 16)
+    pro_pool = Pool(processes = 16)
+    ls = Process(target=linkspider,args=(queuel,))
+    ps = Process(target=parse,args=(queuep,))
+    ls.start()
+    ps.start()
+    for num in range(16):
+        link_pool.apply_async(link_request,args=(num,queuel,))
+        pro_pool.apply_async(product_request,args=(num,queuep,))
+    link_pool.close()
+    pro_pool.close()
+    link_pool.join()
+    pro_pool.join()
+    if L.empty():
+        ls.terminate()
+        print("linkspider is close")
+    if P.empty:
+        ps.terminate()
+        print("parse is close")
+
+if __name__ == '__main__':
+    M = Manager()
+    L = M.Queue()
+    P = M.Queue()
+    main(L,P)
